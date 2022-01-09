@@ -1,0 +1,296 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+ ProjectName:
+   Type: String
+   Default: 'MKECS-SIM-SQUID-SD'
+ AppName:
+   Type: String 
+   Default: 'simsquid'
+ RepositoryName:
+   Type: String
+   Default: 'Image name (excluding account)'
+ VpcId:
+   Type: String
+   Default: 'VPC ID'
+ ProtectedSubnets1:
+   Type: String
+   Default: 'Specify the ID of the private subnet where the router to the public subnet with the NAT gateway is located.'
+ ProtectedSubnets2:
+   Type: String
+   Default: 'Specify the ID of the private subnet where the router to the public subnet with the NAT gateway is located.'
+ OutboundIpRange:
+   Type: String
+   Default: '0.0.0.0/0'
+   # Set up appropriately. In this case, all communication is allowed.
+ InboundIpRange:
+   Type: String
+   Default: '0.0.0.0/0'
+   # Set up appropriately. In this case, all communication is allowed.
+TaskCpu:
+   Type: Number
+   Default: 256
+ TaskMemory:
+   Type: Number
+   Default: 512
+ Namespace:
+   Type: String
+   Default: 'simosan-sd-proxy.com'
+   # Namespaces for Service Discovery(CloudMap)
+ ServiceDiscoveryName:
+   Type: String
+   Default: 'simsquid-sd'
+   # DNS for service discovery for this app
+ DesiredCount:
+   Type: Number
+   Default: 2
+   # Always run two units with MultiAZ
+ EFSFileSystemId:
+   Type: String
+   Default: 'EFS file system ID' 
+ EFSFileSystemNameConf:
+   Type: String
+   Default: 'sim-squid-efs-conf' 
+ EFSHostRootShareConf:
+   Type: String
+   Default: '/simsquid/sd/conf'
+ EFSAccesspointConf:
+   Type: String
+   Default: 'Access point ID'
+ EFSFileSystemNameCache:
+   Type: String
+   Default: 'sim-squid-efs-cache'
+ EFSHostRootShareCache:
+   Type: String
+   Default: '/simsquid/sd/cache'
+ EFSAccesspointCache:
+   Type: String
+   Default: 'Access point ID'
+ EFSFileSystemNameLog:
+   Type: String
+   Default: 'sim-squid-efs-log'
+ EFSHostRootShareLog:
+   Type: String
+   Default: '/simsquid/sd/log'
+ EFSAccesspointLog:
+   Type: String
+   Default: 'Access point ID'
+
+Resources:
+ # -------------------------------------
+ # Fargateですべての通信を許可するセキュリティグループ
+ # -------------------------------------
+ SecurityGroup:
+   Type: AWS::EC2::SecurityGroup
+   Properties:
+     Tags:
+       - Key: Name
+         Value: !Ref ProjectName
+     GroupName: !Ref ProjectName
+     GroupDescription: Security group for the simsquid-service
+     VpcId: !Ref VpcId
+
+ SecurityGroupIngress:
+   Type: AWS::EC2::SecurityGroupIngress
+   Properties:
+     GroupId: !Ref SecurityGroup
+     IpProtocol: -1                     #すべてのプロトコルを許可
+     CidrIp: !Ref InboundIpRange
+
+ SecurityGroupEgress:
+   Type: AWS::EC2::SecurityGroupEgress
+   Properties:
+     GroupId: !Ref SecurityGroup
+     IpProtocol: -1                     #すべてのプロトコルを許可
+     CidrIp: !Ref OutboundIpRange
+
+ LogGroup:
+   Type: AWS::Logs::LogGroup
+   Properties:
+     LogGroupName: !Sub /ecs/${ProjectName}
+
+ PrivateDnsNamespace:
+   Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+   Properties:
+     Vpc: !Ref VpcId
+     Name: !Ref Namespace
+
+ ServiceDiscovery:
+   Type: AWS::ServiceDiscovery::Service
+   Properties:
+     HealthCheckCustomConfig:
+       FailureThreshold: 3
+     DnsConfig:
+       DnsRecords:
+         - Type: A
+           TTL: 60
+       RoutingPolicy: WEIGHTED
+       NamespaceId: !GetAtt PrivateDnsNamespace.Id
+     Name: !Ref ServiceDiscoveryName
+
+ Cluster:
+   Type: AWS::ECS::Cluster
+   Properties:
+     ClusterName: !Ref ProjectName
+
+ Service:
+   Type: AWS::ECS::Service
+   Properties:
+     Cluster: !Ref Cluster
+     DeploymentConfiguration:
+       MaximumPercent: 200
+       MinimumHealthyPercent: 100
+     DesiredCount: !Ref DesiredCount
+     LaunchType: FARGATE
+     PlatformVersion: '1.4.0'
+     NetworkConfiguration:
+       AwsvpcConfiguration:
+         AssignPublicIp: DISABLED  #privateサブネットからNATGW越しにインターネットを利用する場合はDISABLED
+         SecurityGroups:
+           - !Ref SecurityGroup
+         Subnets: 
+           - !Ref ProtectedSubnets1
+           - !Ref ProtectedSubnets2
+     ServiceName: !Ref ProjectName
+     ServiceRegistries:            #ここでECSサービスとサービスディスカバリ(CloudMap）を紐付け
+       - RegistryArn: !GetAtt ServiceDiscovery.Arn
+     TaskDefinition: !Ref ECSTaskDefinition
+
+ # -------------------------------------
+ # タスク起動時に必要なロールを定義
+ # -------------------------------------
+ EcsTaskExecutionRole:
+   Type: AWS::IAM::Role
+   Properties:
+     AssumeRolePolicyDocument:
+       Version: 2012-10-17
+       Statement:
+         - Effect: Allow
+           Principal:
+             Service:
+               - ecs-tasks.amazonaws.com
+           Action:
+             - sts:AssumeRole
+     ManagedPolicyArns:
+       - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+     Policies:
+       - PolicyName: !Sub ${ProjectName}-EcsTaskExecutionRolePolicy
+         PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - secretsmanager:GetSecretValue
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - "*"
+     RoleName: !Sub ${ProjectName}-ecsTaskExecutionRole
+
+ # -------------------------------------
+ # アプリケーションに必要なロールを定義
+ # -------------------------------------
+ EcsTaskRole:
+   Type: AWS::IAM::Role
+   Properties:
+     AssumeRolePolicyDocument:
+       Version: 2012-10-17
+       Statement:
+         - Effect: Allow
+           Principal:
+             Service:
+               - ecs-tasks.amazonaws.com
+               - events.amazonaws.com
+           Action:
+             - sts:AssumeRole
+     ManagedPolicyArns:
+       - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceEventsRole
+     RoleName: !Sub ${ProjectName}-task-role
+
+ EcsTaskRolePolicy:
+   Type: AWS::IAM::Policy
+   Properties:
+     PolicyName: !Sub ${ProjectName}-task-role-policy
+     PolicyDocument:
+       Version: 2012-10-17
+       Statement:
+         - Effect: Allow
+           Action:
+             - s3:List*
+             - s3:Get*
+             - s3:Put*
+           Resource: '*'
+     Roles:
+       - Ref: EcsTaskRole
+
+
+
+ # --------------------------------------------------------------------------
+ # 複数のサービスを起動する場合は以下のリソースを複数作成する必要あり
+ # --------------------------------------------------------------------------
+
+ # -------------------------------------
+ # Fargate タスク定義
+ # -------------------------------------
+ ECSTaskDefinition:
+   Type: AWS::ECS::TaskDefinition
+   Properties:
+     Family: !Ref ProjectName
+     RequiresCompatibilities:
+       - FARGATE
+     Cpu: !Ref TaskCpu
+     Memory: !Ref TaskMemory
+     NetworkMode: awsvpc
+     ExecutionRoleArn: !Ref EcsTaskExecutionRole
+     TaskRoleArn: !Ref EcsTaskRole
+     Volumes:
+       - Name: !Ref EFSFileSystemNameConf
+         EFSVolumeConfiguration:
+            authorizationConfig:
+               accessPointId: !Ref EFSAccesspointConf 
+            FilesystemId: !Ref EFSFileSystemId
+            TransitEncryption: 'ENABLED'
+       - Name: !Ref EFSFileSystemNameCache
+         EFSVolumeConfiguration:
+            authorizationConfig:
+               accessPointId: !Ref EFSAccesspointCache
+            FilesystemId: !Ref EFSFileSystemId
+            TransitEncryption: 'ENABLED'
+       - Name: !Ref EFSFileSystemNameLog
+         EFSVolumeConfiguration:
+            authorizationConfig:
+               accessPointId: !Ref EFSAccesspointLog
+            FilesystemId: !Ref EFSFileSystemId
+            TransitEncryption: 'ENABLED'
+     ContainerDefinitions:
+       - Name: !Ref AppName
+         Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RepositoryName}
+         PortMappings:
+           - ContainerPort: 58080
+             HostPort: 58080
+             Protocol: tcp
+         Environment:
+           - Name: TZ
+             Value: Asia/Tokyo
+         LogConfiguration:
+           LogDriver: awslogs
+           Options:
+             awslogs-region: !Ref 'AWS::Region'
+             awslogs-group: !Ref LogGroup
+             awslogs-create-group: true
+             awslogs-stream-prefix: !Ref AppName
+         Essential: true
+         MountPoints:
+          - SourceVolume: !Ref EFSFileSystemNameConf   # VolumesプロパティのNameと合わせる必要あり
+            ContainerPath: /etc/squid
+            ReadOnly: true  #定義ファイルなので読み取り専用でいい
+          - SourceVolume: !Ref EFSFileSystemNameCache  # VolumesプロパティのNameと合わせる必要あり
+            ContainerPath: /var/spool/squid
+            ReadOnly: false
+          - SourceVolume: !Ref EFSFileSystemNameLog    # VolumesプロパティのNameと合わせる必要あり
+            ContainerPath: /var/log/squid
+            ReadOnly: false 
