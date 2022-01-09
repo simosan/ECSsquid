@@ -24,7 +24,7 @@ Deployments using Cloudformation templates target ECS (Cluster, Service, Task), 
 
 ## Usage
 
-    *Deploy
+   ### Deploy
 
     [NLB]
     $ aws cloudformation deploy --template-file mkecs-squid-elb.yaml --stack-name sim-squid-elb-sn --capabilities CAPABILITY_NAMED_IAM
@@ -32,7 +32,7 @@ Deployments using Cloudformation templates target ECS (Cluster, Service, Task), 
     [CloudMap]
     $ aws cloudformation deploy --template-file mkecs-squid-mz.yaml --stack-name sim-squid-mz-sn --capabilities CAPABILITY_NAMED_IAM
 
-    *Update
+   ### Update
 
     [NLB]
     $ aws cloudformation update-stack --template-body file:///mkecs-squid-elb.yaml --stack-name sim-squid-elb-sn --capabilities CAPABILITY_NAMED_IAM 
